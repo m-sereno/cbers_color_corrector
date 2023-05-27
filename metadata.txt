@@ -1,0 +1,47 @@
+# This file contains metadata for your plugin.
+
+# This file should be included when you package your plugin.# Mandatory items:
+
+[general]
+name=CBERS Color Corrector
+qgisMinimumVersion=3.0
+description=This plugin corrects the color from CBERS images to match the database
+version=0.1
+author=Mateus Sereno
+email=mateus.sereno@ime.eb.br
+
+about=This plugin corrects the color from CBERS images to match the reference data. The reference data is composed by other CBERS images already corrected, manually, by the DSG.
+
+tracker=https://github.com/m-sereno/cbers_color_corrector/issues
+repository=https://github.com/m-sereno/cbers_color_corrector
+# End of mandatory metadata
+
+# Recommended items:
+
+hasProcessingProvider=no
+# Uncomment the following line and add your changelog:
+# changelog=
+
+# Tags are comma separated with spaces allowed
+tags=raster
+
+homepage=https://github.com/m-sereno/cbers_color_corrector
+category=Raster
+icon=icon.png
+# experimental flag
+experimental=True
+
+# deprecated flag (applies to the whole plugin, not just a single version)
+deprecated=False
+
+# Since QGIS 3.8, a comma separated list of plugins to be installed
+# (or upgraded) can be specified.
+# Check the documentation for more information.
+# plugin_dependencies=
+
+Category of the plugin: Raster, Vector, Database or Web
+# category=
+
+# If the plugin can run on QGIS Server.
+server=False
+
