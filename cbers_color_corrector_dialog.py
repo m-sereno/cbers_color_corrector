@@ -26,6 +26,9 @@ import os
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
+from qgis.core import QgsProject, QgsMapLayerType, QgsMessageLog
+from qgis.PyQt.QtCore import QCoreApplication, Qt
+from qgis.PyQt.QtWidgets import QDialog, QComboBox
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
@@ -36,9 +39,20 @@ class CBERSColorCorrectorDialog(QtWidgets.QDialog, FORM_CLASS):
     def __init__(self, parent=None):
         """Constructor."""
         super(CBERSColorCorrectorDialog, self).__init__(parent)
-        # Set up the user interface from Designer through FORM_CLASS.
-        # After self.setupUi() you can access any designer object by doing
-        # self.<objectname>, and you can use autoconnect slots - see
-        # http://qt-project.org/doc/qt-4.8/designer-using-a-ui-file.html
-        # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
+
+        self.populate_combobox()
+        self.button_box.accepted.connect(self.on_ok_clicked)
+
+    def populate_combobox(self):
+        """Populate the combo box with available raster layers."""
+        layers = QgsProject.instance().mapLayers().values()
+        for layer in layers:
+            if layer.type() == QgsMapLayerType.RasterLayer:
+                self.selectLayerComboBox.addItem(layer.name())
+    
+    def on_ok_clicked(self):
+        """Handle the OK button click."""
+        selected_layer = self.selectLayerComboBox.currentText()
+        # This will log the name of the selected layer when the OK button is clicked.
+        QgsMessageLog.logMessage(f'Selected layer: {selected_layer}')
