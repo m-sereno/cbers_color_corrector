@@ -25,6 +25,7 @@ import os
 
 import numpy as np
 import requests
+from typing import List
 
 from qgis.core import QgsRasterLayer, QgsProject
 from qgis.PyQt import uic
@@ -128,7 +129,7 @@ class CBERSColorCorrectorDialog(QtWidgets.QDialog, FORM_CLASS):
 
         return matching_function
     
-    def compute_average_function(self, hist_matching_functions : list(HistMatchingFunction)):
+    def compute_average_function(self, hist_matching_functions : List[HistMatchingFunction]):
         avg_f = HistMatchingFunction()
 
         for value in range(256):
