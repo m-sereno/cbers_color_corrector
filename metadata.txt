@@ -8,9 +8,9 @@ qgisMinimumVersion=3.0
 description=This plugin corrects the color from CBERS images to match the database
 version=0.1
 author=Mateus Sereno
-email=mateus.sereno@ime.eb.br
+email=mateus.sereno@gmail.com
 
-about=This plugin corrects the color from CBERS images to match the reference data. The reference data is composed by other CBERS images already corrected, manually, by the DSG.
+about=This plugin corrects the color from CBERS images to match the database
 
 tracker=https://github.com/m-sereno/cbers_color_corrector/issues
 repository=https://github.com/m-sereno/cbers_color_corrector
@@ -18,18 +18,18 @@ repository=https://github.com/m-sereno/cbers_color_corrector
 
 # Recommended items:
 
-hasProcessingProvider=no
+hasProcessingProvider=yes
 # Uncomment the following line and add your changelog:
 # changelog=
 
 # Tags are comma separated with spaces allowed
-tags=raster
+tags=python
 
 homepage=https://github.com/m-sereno/cbers_color_corrector
-category=Raster
+category=Analysis
 icon=icon.png
 # experimental flag
-experimental=True
+experimental=False
 
 # deprecated flag (applies to the whole plugin, not just a single version)
 deprecated=False

@@ -1,5 +1,0 @@
-<RCC>
-    <qresource prefix="/plugins/cbers_color_corrector" >
-        <file>icon.png</file>
-    </qresource>
-</RCC>

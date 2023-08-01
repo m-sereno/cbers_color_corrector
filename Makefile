@@ -3,10 +3,10 @@
 #
 # This plugin corrects the color from CBERS images to match the database
 #							 -------------------
-#		begin				: 2023-05-27
+#		begin				: 2023-08-01
 #		git sha				: $Format:%H$
 #		copyright			: (C) 2023 by Mateus Sereno
-#		email				: mateus.sereno@ime.eb.br
+#		email				: mateus.sereno@gmail.com
 # ***************************************************************************/
 #
 #/***************************************************************************
@@ -38,21 +38,21 @@ LOCALES =
 # translation
 SOURCES = \
 	__init__.py \
-	cbers_color_corrector.py cbers_color_corrector_dialog.py
+	cbers_color_corrector.py 
 
 PLUGINNAME = cbers_color_corrector
 
 PY_FILES = \
 	__init__.py \
-	cbers_color_corrector.py cbers_color_corrector_dialog.py
+	cbers_color_corrector.py 
 
-UI_FILES = cbers_color_corrector_dialog_base.ui
+UI_FILES = 
 
-EXTRAS = metadata.txt icon.png
+EXTRAS = metadata.txt 
 
 EXTRA_DIRS =
 
-COMPILED_RESOURCE_FILES = resources.py
+COMPILED_RESOURCE_FILES = 
 
 PEP8EXCLUDE=pydev,resources.py,conf.py,third_party,ui
 
@@ -75,7 +75,7 @@ HELP = help/build/html
 
 PLUGIN_UPLOAD = $(c)/plugin_upload.py
 
-RESOURCE_SRC=$(shell grep '^ *<file' resources.qrc | sed 's@</file>@@g;s/.*>//g' | tr '\n' ' ')
+RESOURCE_SRC=$(shell grep '^ *<file'  | sed 's@</file>@@g;s/.*>//g' | tr '\n' ' ')
 
 .PHONY: default
 default:
