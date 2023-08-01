@@ -47,6 +47,33 @@ class CBERSColorCorrectorDialog(QtWidgets.QDialog, FORM_CLASS):
         self.populate_combobox()
         self.button_box.accepted.connect(self.on_ok_clicked)
 
+        self.all_histograms = list()
+        self.diverse_histograms = list()
+    
+    def euclidean_distance(self, v1, v2):
+        """Calculate the Euclidean distance between two vectors."""
+        return np.sqrt(np.sum((v1 - v2) ** 2))
+    
+    def find_most_diverse(self, M):
+        """Find the M most diverse vectors from the list."""
+        
+        # Create a copy of the list so we can modify it
+        vectors = list(self.all_histograms)
+        
+        # Start with a randomly chosen vector
+        diverse_vectors = [vectors.pop(np.random.randint(len(vectors)))]
+
+        # Repeat until we have selected M vectors
+        while len(diverse_vectors) < M:
+            # For each vector, calculate the minimum distance to the selected vectors
+            min_distances = [min(self.euclidean_distance(self, v, selected) for selected in diverse_vectors)
+                            for v in vectors]
+            
+            # Select the vector with the maximum minimum distance
+            diverse_vectors.append(vectors.pop(np.argmax(min_distances)))
+
+        return diverse_vectors
+
     def populate_combobox(self):
         """Populate the combo box with available raster layers."""
         layers = QgsProject.instance().mapLayers().values()
@@ -85,5 +112,23 @@ class CBERSColorCorrectorDialog(QtWidgets.QDialog, FORM_CLASS):
 
                     histogram, bin_edges = np.histogram(data, bins=256, range=(0, 256))
 
+                    self.all_histograms.append(histogram)
+
                     # Print histogram:
-                    QgsMessageLog.logMessage("Histogram for tile ({}, {}, {}): {}".format(band_index, y_start, x_start, histogram))
+                    # QgsMessageLog.logMessage("Histogram for tile ({}, {}, {}): {}".format(band_index, y_start, x_start, histogram))
+
+        diverse_vectors = self.find_most_diverse(20)
+        self.diverse_histograms = diverse_vectors
+
+        # For each diverse_vector,
+        #     Calculate CDF...
+
+        #     Calculate Embedding...
+
+        #     Send request {"embedding": object}
+        #     Get reponse {"best_match_cdf": object, "similarity": float}
+
+        #     Calculate hist mapping function
+
+        # Calculate equivalent function
+        # Apply on the inputted image.
