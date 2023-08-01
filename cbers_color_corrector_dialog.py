@@ -24,9 +24,12 @@
 
 import os
 
+import numpy as np
+
+from qgis.core import QgsRasterLayer, QgsProject
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
-from qgis.core import QgsProject, QgsMapLayerType, QgsMessageLog
+from qgis.core import QgsProject, QgsMapLayerType, QgsMessageLog, QgsRasterLayer, QgsRectangle, QgsRasterBlock, Qgis
 from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtWidgets import QDialog, QComboBox
 
@@ -54,5 +57,33 @@ class CBERSColorCorrectorDialog(QtWidgets.QDialog, FORM_CLASS):
     def on_ok_clicked(self):
         """Handle the OK button click."""
         selected_layer = self.selectLayerComboBox.currentText()
-        # This will log the name of the selected layer when the OK button is clicked.
-        QgsMessageLog.logMessage(f'Selected layer: {selected_layer}')
+        QgsMessageLog.logMessage(f'Selected layer: {selected_layer}', "CBERSColorCorrector", Qgis.Info)
+
+        # Load the raster
+        layer = QgsProject.instance().mapLayersByName(selected_layer)[0]
+        
+        width = layer.width()
+        height = layer.height()
+
+        provider = layer.dataProvider()
+
+        for band_index in range(0, 3):
+            for y_start in range(0, width, 512):
+                for x_start in range(0, height, 512):
+                    # Define the extent of the current tile:
+                    extent = QgsRectangle(
+                        layer.extent().xMinimum() + x_start * layer.rasterUnitsPerPixelX(),
+                        layer.extent().yMinimum() + y_start * layer.rasterUnitsPerPixelY(),
+                        layer.extent().xMinimum() + (x_start + 512) * layer.rasterUnitsPerPixelX(),
+                        layer.extent().yMinimum() + (y_start + 512) * layer.rasterUnitsPerPixelY()
+                    )
+
+                    # Read tile data:
+                    tile : QgsRasterBlock = provider.block(band_index, extent, 512, 512)
+
+                    data = tile.data()
+
+                    histogram, bin_edges = np.histogram(data, bins=256, range=(0, 256))
+
+                    # Print histogram:
+                    QgsMessageLog.logMessage("Histogram for tile ({}, {}, {}): {}".format(band_index, y_start, x_start, histogram))
