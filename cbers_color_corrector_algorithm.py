@@ -42,6 +42,8 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingParameterRasterLayer,
                        QgsProcessingParameterFile,
                        QgsProcessingParameterFileDestination,
+                       QgsProcessingParameterNumber,
+                       QgsProcessingParameterString,
                        QgsRasterLayer,
                        QgsProcessingParameterFeatureSink,
                        QgsProcessingException,
@@ -100,6 +102,23 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
                 self.tr('OUTPUT DESTINATION')
             )
         )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                'SAMPLE_TILES',
+                self.tr('Number of sample tiles'),
+                minValue=1,
+                defaultValue=20
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterString(
+                'SERVER_URL',
+                self.tr('Server URL'),
+                defaultValue='https://server-url/endpoint'
+            )
+    )
     
     def euclidean_distance(self, v1, v2):
         """Calculate the Euclidean distance between two vectors."""
@@ -165,6 +184,8 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
     def processAlgorithm(self, parameters, context, feedback):
         input_file = self.parameterAsFile(parameters, self.INPUT, context)
         output_file = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
+        sample_tiles = self.parameterAsInt(parameters, 'SAMPLE_TILES', context)
+        server_url = self.parameterAsString(parameters, 'SERVER_URL', context)
 
         # Load the raster
         feedback.pushInfo('Loading the raster layer...')
@@ -215,7 +236,7 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
 
                 all_histograms.append(tile_hist)
         
-        diverse_histograms = self.find_most_diverse(all_histograms, 20)
+        diverse_histograms = self.find_most_diverse(all_histograms, sample_tiles)
 
         hist_matching_functions = []
 
@@ -230,7 +251,7 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
 
             best_match_req = BestMatchRequest()
 
-            url = 'https://server-url/endpoint'
+            url = server_url
 
             res = requests.post(url, json=best_match_req)
             best_match_res : BestMatchResponse = res.json()
