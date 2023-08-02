@@ -1,39 +1,39 @@
-<html>
-<body>
-<h3>Plugin Builder Results</h3>
+# 🛰️🖼️ CBERS Color Corrector
 
-Congratulations! You just built a plugin for QGIS!<br/><br />
+## Description
 
-<div id='help' style='font-size:.9em;'>
-Your plugin <b>CBERSColorCorrector</b> was created in:<br>
-&nbsp;&nbsp;<b>D:/Users/Mateus/Desktop/IME/Carto/5o Ano/PFC/Plugin\cbers_color_corrector</b>
-<p>
-Your QGIS plugin directory is located at:<br>
-&nbsp;&nbsp;<b>C:/Users/Mateus/AppData/Roaming/QGIS/QGIS3/profiles/default/python/plugins</b>
-<p>
-<h3>What's Next</h3>
-<ol>
-    <li>Test the generated sources using <b>make test</b> (or run tests from your IDE)
-    <li>Copy the entire directory containing your new plugin to the QGIS plugin directory (see Notes below)
-    <li>Test the plugin by enabling it in the QGIS plugin manager and enabling the provider in the Processing Options
-    <li>Customize it by editing the implementation file <b>cbers_color_corrector_algorithm.py</b>
-</ol>
-Notes:
-<ul>
-    <li>You can use the <b>Makefile</b> to compile and deploy when you
-        make changes. This requires GNU make (gmake). The Makefile is ready to use, however you 
-        will have to edit it to add addional Python source files, dialogs, and translations.
-    <li>You can also use <b>pb_tool</b> to compile and deploy your plugin. Tweak the <i>pb_tool.cfg</i> file included with your plugin as you add files. Install <b>pb_tool</b> using 
-        <i>pip</i> or <i>easy_install</i>. See <b>http://loc8.cc/pb_tool</b> for more information.
-</ul>
-</div>
-<div style='font-size:.9em;'>
-<p>
-For information on writing PyQGIS code, see <b>http://loc8.cc/pyqgis_resources</b> for a list of resources.
-</p>
-</div>
-<p>
-&copy;2011-2018 GeoApt LLC - geoapt.com 
-</p>
-</body>
-</html>
+CBERS Color Corrector is a QGIS plugin that aims to improve the quality of CBERS images by correcting their colors to match a reference dataset. This reference data is composed of CBERS images that have already been corrected by the DSG, Brazilian Army.
+
+## Features
+
+1. Automatically correct the color distribution for a CBERS image, provided that it has already undergone the pansharpening process.
+
+## Installation
+
+1. Open QGIS.
+2. Navigate to `Plugins` > `Manage and Install Plugins...`.
+3. In the `Search` bar, type `CBERS Color Corrector`.
+4. Click `Install Plugin`.
+
+## Usage
+
+1. After installation, navigate to `Processing Toolbox` > `CBERS Color Corrector`.
+2. A dialog box will prompt you to select an input image file as well as other parameters.
+3. Specify the parameters.
+4. Click `Run`.
+5. The plugin will then split the image into many tiles, send a diverse subset to the server.
+6. The server responds with correction functions based on the best matching tile pairs and their histogram matching functions.
+7. The plugin calculates a global histogram correction function based on the server response.
+7. The plugin applies this function to the image to generate the corrected output.
+
+## Contributing
+
+We welcome any contributions to the CBERS Color Corrector project. Please feel free to submit a pull request or open an issue.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for more details.
+
+## Contact
+
+If you have any questions, feedback, or issues, please feel free to contact us.
