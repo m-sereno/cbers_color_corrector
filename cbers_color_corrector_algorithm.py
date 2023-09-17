@@ -32,10 +32,15 @@ __revision__ = '$Format:%H$'
 
 import numpy as np
 import requests
-from typing import List
+from requests.auth import HTTPBasicAuth
+from typing import Dict, List, Tuple, Union
+
+from osgeo import gdal, ogr
+from osgeo.gdal import Dataset
 
 from qgis.PyQt.QtCore import QCoreApplication
-from qgis.core import (QgsProcessing,
+from qgis.core import (Qgis,
+                       QgsProcessing,
                        QgsFeatureSink,
                        QgsProcessingAlgorithm,
                        QgsProcessingParameterFeatureSource,
@@ -45,6 +50,7 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingParameterNumber,
                        QgsProcessingParameterString,
                        QgsRasterLayer,
+                       QgsRasterDataProvider,
                        QgsProcessingParameterFeatureSink,
                        QgsProcessingException,
                        QgsRasterFileWriter,
@@ -60,10 +66,10 @@ class TileHistogram():
         self.b_hist = b_hist
 
 class TileCdf():
-    def __init__(self, r_cdf : np.ndarray, g_cdf : np.ndarray, b_cdf : np.ndarray):
-        self.r_cdf = r_cdf
-        self.g_cdf = g_cdf
-        self.b_cdf = b_cdf
+    def __init__(self, r : np.ndarray, g : np.ndarray, b : np.ndarray):
+        self.r = r
+        self.g = g
+        self.b = b
 
 class HistMatchingFunction():
     def __init__(self, r_func : np.ndarray, g_func : np.ndarray, b_func : np.ndarray):
@@ -71,14 +77,81 @@ class HistMatchingFunction():
         self.g_func = g_func
         self.b_func = b_func
 
-class BestMatchRequest():
-    def __init__(self, embedding: np.ndarray):
-        self.embedding = embedding
+PixelRGB = Tuple[int, int, int]
+Image = List[List[PixelRGB]]
 
-class BestMatchResponse():
-    def __init__(self, best_match_cdf: TileCdf, similarity: float):
-        self.best_match_cdf = best_match_cdf
+class BestMatchRequest():
+    def __init__(self, tile_512 : Image):
+        self.tile_512 = tile_512
+    
+    def to_dict(self):
+        # Convert the Image attribute to a serializable format
+        serializable_image = [[list([int(pixel[0]), int(pixel[1]), int(pixel[2])]) for pixel in row] for row in self.tile_512]
+        return {'tile512': serializable_image}
+
+class BestMatchResponse:
+    def __init__(self, cdf: TileCdf, similarity: float):
+        self.cdf = cdf
         self.similarity = similarity
+
+    def from_json(dct):
+        cdf_data = dct['cdf']
+        r = np.array(cdf_data['r'])
+        g = np.array(cdf_data['g'])
+        b = np.array(cdf_data['b'])
+        return BestMatchResponse(cdf=TileCdf(r=r, g=g, b=b), similarity=dct['similarity'])
+    
+
+def readAsNumpy(inputRaster: Union[str, QgsRasterLayer], band: int) -> Tuple[Dataset, np.array]:
+    inputRasterPath = (
+        inputRaster.dataProvider().dataSourceUri()
+        if isinstance(inputRaster, QgsRasterLayer)
+        else inputRaster
+    )
+    ds = gdal.Open(inputRasterPath)
+    np_arr = np.array(ds.GetRasterBand(band).ReadAsArray().transpose())
+    return ds, np_arr
+
+def writeFromNumpy(r: np.array, g: np.array, b: np.array, outFileName: str, ref_ds: Dataset):
+    filenameNoExtension = outFileName.split('.')[0]
+    actualFilename = filenameNoExtension + '.TIF'
+
+    r_t = r.transpose()
+    g_t = g.transpose()
+    b_t = b.transpose()
+
+    [rows, cols] = r_t.shape
+    driver = gdal.GetDriverByName("GTiff")
+    outdata = driver.Create(actualFilename, cols, rows, 3, gdal.GDT_UInt16)
+    outdata.SetGeoTransform(ref_ds.GetGeoTransform())
+    outdata.SetProjection(ref_ds.GetProjection())
+
+    outdata.GetRasterBand(1).WriteArray(r_t)
+    outdata.GetRasterBand(2).WriteArray(g_t)
+    outdata.GetRasterBand(3).WriteArray(b_t)
+
+    outdata.FlushCache() ##saves to disk!!
+    outdata = None
+
+def apply_histogram_matching_function(tgt_img, f):
+  matched_image = np.zeros_like(tgt_img)
+
+  r_band = tgt_img[:,:,0]
+  for row_idx in r_band.shape[0]:
+    for col_idx in r_band.shape[1]:
+      matched_image[row_idx, col_idx, 0] = int(f.r_func[r_band[row_idx, col_idx]])
+
+  g_band = tgt_img[:,:,1]
+  for row_idx in g_band.shape[0]:
+    for col_idx in g_band.shape[1]:
+      matched_image[row_idx, col_idx, 1] = int(f.g_func[g_band[row_idx, col_idx]])
+
+  b_band = tgt_img[:,:,0]
+  for row_idx in b_band.shape[0]:
+    for col_idx in b_band.shape[1]:
+      matched_image[row_idx, col_idx, 2] = int(f.b_func[b_band[row_idx, col_idx]])
+
+  return matched_image
 
 
 class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
@@ -133,51 +206,57 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         return dist_r + dist_g + dist_b
     
     def find_most_diverse(self, all_histograms, M):
-        """Find the M most diverse vectors from the list."""
-        
-        # Create a copy of the list so we can modify it
-        hists = list(all_histograms)
-        
-        # Start with a randomly chosen histogram
-        diverse_picks = [hists.pop(np.random.randint(len(hists)))]
+      """Find the indexes of the M most diverse vectors from the list."""
 
-        # Repeat until we have selected M histograms
-        while len(diverse_picks) < M:
-            # For each tile histogram, calculate the minimum distance to the selected ones
-            min_distances = [min(self.tile_hist_distance(self, v, selected) for selected in diverse_picks)
-                            for v in hists]
-            
-            # Select the vector with the maximum minimum distance
-            diverse_picks.append(hists.pop(np.argmax(min_distances)))
+      elem_count = len(all_histograms)
+      
+      # Create a list of indices
+      indices = list(range(elem_count))
 
-        return diverse_picks
+      if (elem_count <= M):
+          return indices
+      
+      # Start with a randomly chosen histogram index
+      diverse_picks = [indices.pop(np.random.randint(len(indices)))]
+      
+      # Repeat until we have selected M histograms
+      while len(diverse_picks) < M:
+          # For each tile histogram, calculate the minimum distance to the selected ones
+          min_distances = [min(self.tile_hist_distance(all_histograms[i], all_histograms[selected]) 
+                              for selected in diverse_picks) for i in indices]
+          
+          # Select the index of the vector with the maximum minimum distance
+          max_index = np.argmax(min_distances)
+          diverse_picks.append(indices.pop(max_index))
+
+      return diverse_picks
     
     def get_histogram_matching_function_band(self, cdf1_band : np.ndarray, cdf2_band : np.ndarray):
         matching_function_band = np.zeros_like(cdf1_band)
 
         for i in range(256):
-            diff = np.abs(cdf1_band[i] - cdf2_band[i])
+            diff = np.abs(cdf1_band[i] - cdf2_band)
             idx = np.argmin(diff)
             matching_function_band[i] = idx
 
         return matching_function_band
     
     def get_histogram_matching_function(self, cdf1 : TileCdf, cdf2 : TileCdf):
-        matching_function = HistMatchingFunction()
+        r_func = self.get_histogram_matching_function_band(cdf1.r, cdf2.r)
+        g_func = self.get_histogram_matching_function_band(cdf1.g, cdf2.g)
+        b_func = self.get_histogram_matching_function_band(cdf1.b, cdf2.b)
 
-        matching_function.r_func = self.get_histogram_matching_function_band(cdf1.r_cdf, cdf2.r_cdf)
-        matching_function.g_func = self.get_histogram_matching_function_band(cdf1.g_cdf, cdf2.g_cdf)
-        matching_function.b_func = self.get_histogram_matching_function_band(cdf1.b_cdf, cdf2.b_cdf)
+        matching_function = HistMatchingFunction(r_func, g_func, b_func)
 
         return matching_function
     
     def compute_average_function(self, hist_matching_functions : List[HistMatchingFunction]):
-        avg_f = HistMatchingFunction()
+        avg_f = hist_matching_functions[0]
 
         for value in range(256):
-            avg_f.r_func = np.mean([func[value].r_func for func in hist_matching_functions])
-            avg_f.g_func = np.mean([func[value].g_func for func in hist_matching_functions])
-            avg_f.b_func = np.mean([func[value].b_func for func in hist_matching_functions])
+            avg_f.r_func[value] = np.mean([func.r_func[value] for func in hist_matching_functions])
+            avg_f.g_func[value] = np.mean([func.g_func[value] for func in hist_matching_functions])
+            avg_f.b_func[value] = np.mean([func.b_func[value] for func in hist_matching_functions])
 
         return avg_f
 
@@ -195,89 +274,124 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         if not input_layer.isValid():
             raise QgsProcessingException("Could not load layer")
         
-        provider = input_layer.dataProvider()
-        width = input_layer.width()
-        height = input_layer.height()
+        # TODO: Actually load in chunks. Only the necessary number
+        
+        as_np_tuple_1 = readAsNumpy(input_layer, 1)
+        as_np_dataset_1 = as_np_tuple_1[0]
+        as_np_array_1 = as_np_tuple_1[1]
+
+        as_np_tuple_2 = readAsNumpy(input_layer, 2)
+        as_np_dataset_2 = as_np_tuple_2[0]
+        as_np_array_2 = as_np_tuple_2[1]
+
+        as_np_tuple_3 = readAsNumpy(input_layer, 3)
+        as_np_dataset_3 = as_np_tuple_3[0]
+        as_np_array_3 = as_np_tuple_3[1]
+
+        width = np.shape(as_np_array_1)[0]
+        height = np.shape(as_np_array_1)[1]
 
         feedback.pushInfo(str(height))
 
-        provider = input_layer.dataProvider()
-
         all_histograms = []
+        all_images = []
+
+        feedback.pushInfo('Calculating histograms...')
 
         for y_start in range(0, width, 512):
             for x_start in range(0, height, 512):
                 
-                # Define the extent of the current tile:
-                extent = QgsRectangle(
-                    input_layer.extent().xMinimum() + x_start * input_layer.rasterUnitsPerPixelX(),
-                    input_layer.extent().yMinimum() + y_start * input_layer.rasterUnitsPerPixelY(),
-                    input_layer.extent().xMinimum() + (x_start + 512) * input_layer.rasterUnitsPerPixelX(),
-                    input_layer.extent().yMinimum() + (y_start + 512) * input_layer.rasterUnitsPerPixelY()
-                )
-
-                # Calculate the histogram
-                tile_hist = TileHistogram([], [], [])
-                hist_list = list()
-
-                for band_index in range(1, 4):
-
-                    # Read tile data:
-                    tile : QgsRasterBlock = provider.block(band_index, extent, 512, 512)
-                    data = tile.data()
-
-                    # Compute histogram:
-                    histogram, bin_edges = np.histogram(data, bins=256, range=(0, 256))
-                    hist_list.append(histogram)
+                if (x_start+512 >= width):
+                    continue
                 
-                tile_hist.r_hist = hist_list[0]
-                tile_hist.g_hist = hist_list[1]
-                tile_hist.b_hist = hist_list[2]
+                if (y_start+512 >= height):
+                    continue
+                
+                data_red = as_np_array_1[x_start:x_start+512, y_start:y_start+512]
+                data_gre = as_np_array_2[x_start:x_start+512, y_start:y_start+512]
+                data_blu = as_np_array_3[x_start:x_start+512, y_start:y_start+512]
+
+                hist_red, bin_edges = np.histogram(data_red, bins=256, range=(0,255), density=True)
+                hist_gre, bin_edges = np.histogram(data_gre, bins=256, range=(0,255), density=True)
+                hist_blu, bin_edges = np.histogram(data_blu, bins=256, range=(0,255), density=True)
+
+                tile_hist = TileHistogram(hist_red, hist_gre, hist_blu)
 
                 all_histograms.append(tile_hist)
+                
+                # Create an Image object:
+                image = []
+                for i in range(512):
+                    row = []
+                    for j in range(512):
+                        pixel_rgb = (data_red[i,j], data_gre[i,j], data_blu[i,j])
+                        row.append(pixel_rgb)
+                    image.append(row)
+                
+                # Append the Image object to the all_images list:
+                all_images.append(image)
         
-        diverse_histograms = self.find_most_diverse(all_histograms, sample_tiles)
+        feedback.pushInfo('Finding diverse...')
+
+        diverse_indexes = self.find_most_diverse(all_histograms, sample_tiles)
+        diverse_histograms = [all_histograms[i] for i in diverse_indexes]
+        diverse_images = [all_images[i] for i in diverse_indexes]
 
         hist_matching_functions = []
 
+        feedback.pushInfo('Getting best matches...')
+
         for hist_index in range(0, len(diverse_histograms)):
             hist : TileHistogram = diverse_histograms[hist_index]
-            cdf = TileCdf()
-            cdf.r_cdf = np.cumsum(hist.r_hist)
-            cdf.g_cdf = np.cumsum(hist.g_hist)
-            cdf.b_cdf = np.cumsum(hist.b_hist)
+            img : Image = diverse_images[hist_index]
 
-            # TODO: CALCULATE EMBEDDING.
+            r_cdf = np.cumsum(hist.r_hist)
+            g_cdf = np.cumsum(hist.g_hist)
+            b_cdf = np.cumsum(hist.b_hist)
+            cdf = TileCdf(r_cdf, g_cdf, b_cdf)
 
-            best_match_req = BestMatchRequest()
+            best_match_req = BestMatchRequest(tile_512=img)
 
             url = server_url
+            req_obj = best_match_req.to_dict()
+            headers = {'Content-type': 'application/json', 'Accept-Charset': 'UTF-8'}
+            basic = HTTPBasicAuth('msereno', 'pfc2023')
 
-            res = requests.post(url, json=best_match_req)
-            best_match_res : BestMatchResponse = res.json()
+            res = requests.post(url, json=req_obj, headers=headers, verify=False, auth=basic)
+            best_match_res_json = res.json()
 
-            res_cdf = best_match_res.best_match_cdf
+            best_match_res = BestMatchResponse.from_json(best_match_res_json)
+
+            res_cdf : TileCdf = best_match_res.cdf
+            res_similarity = best_match_res.similarity
 
             hist_mapping_f = self.get_histogram_matching_function(cdf, res_cdf)
             hist_matching_functions.append(hist_mapping_f)
 
+        feedback.pushInfo('Computing average function...')
+
         avg_hist_matching_f = self.compute_average_function(hist_matching_functions)
 
-        # TODO: Apply the function to the original image.
-        # TODO: The result will be saved to a new file
+        feedback.pushInfo('Applying on output...')
 
-        writer = QgsRasterFileWriter(output_file)
+        # Output...
+        output_array_1 = np.copy(as_np_array_1)
+        output_array_2 = np.copy(as_np_array_2)
+        output_array_3 = np.copy(as_np_array_3)
 
-        pipe = QgsRasterPipe()
-        if not pipe.set(input_layer.dataProvider().clone()):
-            return False
-        
-        # Write raster file
-        writer.writeRaster(pipe,
-                          input_layer.rasterUnitsPerPixelX(),
-                          input_layer.rasterUnitsPerPixelY(),
-                          input_layer.extent(),
-                          input_layer.crs())
+        # Apply the hist_matching_function
+        for x in range(width):
+            for y in range(height):
+                output_array_1[x, y] = avg_hist_matching_f.r_func[as_np_array_1[x, y]]
+                output_array_2[x, y] = avg_hist_matching_f.g_func[as_np_array_2[x, y]]
+                output_array_3[x, y] = avg_hist_matching_f.b_func[as_np_array_3[x, y]]
+
+        feedback.pushInfo('Saving...')
+
+        # Save:
+        writeFromNumpy(output_array_1, output_array_2, output_array_3, output_file, as_np_dataset_1)
+
+        return {self.OUTPUT: output_file}
         
 
     def name(self):
