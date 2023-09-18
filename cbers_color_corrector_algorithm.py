@@ -58,6 +58,10 @@ from qgis.core import (Qgis,
                        QgsRasterPipe,
                        QgsRectangle)
 
+TILE_SIZE = 512
+REWRITE_STEP_SIZE = 256
+RANDOM_CHUNKS = 50
+MISSING_PIXEL_TOL = 0.01
 
 class TileHistogram():
     def __init__(self, r_hist : np.ndarray, g_hist : np.ndarray, b_hist : np.ndarray):
@@ -100,35 +104,57 @@ class BestMatchResponse:
         g = np.array(cdf_data['g'])
         b = np.array(cdf_data['b'])
         return BestMatchResponse(cdf=TileCdf(r=r, g=g, b=b), similarity=dct['similarity'])
-    
 
-def readAsNumpy(inputRaster: Union[str, QgsRasterLayer], band: int) -> Tuple[Dataset, np.array]:
+
+def openGdalDataset(inputRaster: Union[str, QgsRasterLayer]) -> Dataset:
     inputRasterPath = (
         inputRaster.dataProvider().dataSourceUri()
         if isinstance(inputRaster, QgsRasterLayer)
         else inputRaster
     )
     ds = gdal.Open(inputRasterPath)
-    np_arr = np.array(ds.GetRasterBand(band).ReadAsArray().transpose())
-    return ds, np_arr
+    return ds
 
-def writeFromNumpy(r: np.array, g: np.array, b: np.array, outFileName: str, ref_ds: Dataset):
+def loadTile(gdalDs: Dataset, band: int, x_off: int, y_off: int, x_size: int, y_size: int) -> np.array:
+    np_arr = np.array(gdalDs.GetRasterBand(band).ReadAsArray(x_off, y_off, x_size, y_size).transpose())
+    return np_arr
+
+def writeApplyingFunction(ds_in: Dataset, hm_f: HistMatchingFunction, outFileName: str):
     filenameNoExtension = outFileName.split('.')[0]
     actualFilename = filenameNoExtension + '.TIF'
 
-    r_t = r.transpose()
-    g_t = g.transpose()
-    b_t = b.transpose()
+    rb1 = ds_in.GetRasterBand(1)
+    width = rb1.XSize
+    height = rb1.YSize
 
-    [rows, cols] = r_t.shape
     driver = gdal.GetDriverByName("GTiff")
-    outdata = driver.Create(actualFilename, cols, rows, 3, gdal.GDT_UInt16)
-    outdata.SetGeoTransform(ref_ds.GetGeoTransform())
-    outdata.SetProjection(ref_ds.GetProjection())
+    outdata = driver.Create(actualFilename, width, height, 3, gdal.GDT_UInt16)
+    outdata.SetGeoTransform(ds_in.GetGeoTransform())
+    outdata.SetProjection(ds_in.GetProjection())
 
-    outdata.GetRasterBand(1).WriteArray(r_t)
-    outdata.GetRasterBand(2).WriteArray(g_t)
-    outdata.GetRasterBand(3).WriteArray(b_t)
+    for x_off in range(0, width, REWRITE_STEP_SIZE):
+        if (x_off + REWRITE_STEP_SIZE > width):
+            continue
+        
+        for y_off in range(0, height, REWRITE_STEP_SIZE):
+            if (y_off + REWRITE_STEP_SIZE > height):
+                continue
+            
+            arr_r = np.array(ds_in.GetRasterBand(1).ReadAsArray(x_off, y_off, REWRITE_STEP_SIZE, REWRITE_STEP_SIZE))
+            arr_g = np.array(ds_in.GetRasterBand(2).ReadAsArray(x_off, y_off, REWRITE_STEP_SIZE, REWRITE_STEP_SIZE))
+            arr_b = np.array(ds_in.GetRasterBand(3).ReadAsArray(x_off, y_off, REWRITE_STEP_SIZE, REWRITE_STEP_SIZE))
+
+            [rows, cols] = arr_r.shape
+
+            for x in range(rows):
+                for y in range(cols):
+                    arr_r[x, y] = hm_f.r_func[arr_r[x, y]]
+                    arr_g[x, y] = hm_f.g_func[arr_g[x, y]]
+                    arr_b[x, y] = hm_f.b_func[arr_b[x, y]]
+            
+            outdata.GetRasterBand(1).WriteArray(arr_r, x_off, y_off)
+            outdata.GetRasterBand(2).WriteArray(arr_g, x_off, y_off)
+            outdata.GetRasterBand(3).WriteArray(arr_b, x_off, y_off)
 
     outdata.FlushCache() ##saves to disk!!
     outdata = None
@@ -266,70 +292,63 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         sample_tiles = self.parameterAsInt(parameters, 'SAMPLE_TILES', context)
         server_url = self.parameterAsString(parameters, 'SERVER_URL', context)
 
-        # Load the raster
-        feedback.pushInfo('Loading the raster layer...')
+        # Open the raster
+        feedback.pushInfo('Opening raster file...')
         input_layer = QgsRasterLayer(input_file, "input")
 
         # Ensure the layer was loaded successfully
         if not input_layer.isValid():
             raise QgsProcessingException("Could not load layer")
         
-        # TODO: Actually load in chunks. Only the necessary number
-        
-        as_np_tuple_1 = readAsNumpy(input_layer, 1)
-        as_np_dataset_1 = as_np_tuple_1[0]
-        as_np_array_1 = as_np_tuple_1[1]
-
-        as_np_tuple_2 = readAsNumpy(input_layer, 2)
-        as_np_dataset_2 = as_np_tuple_2[0]
-        as_np_array_2 = as_np_tuple_2[1]
-
-        as_np_tuple_3 = readAsNumpy(input_layer, 3)
-        as_np_dataset_3 = as_np_tuple_3[0]
-        as_np_array_3 = as_np_tuple_3[1]
-
-        width = np.shape(as_np_array_1)[0]
-        height = np.shape(as_np_array_1)[1]
-
-        feedback.pushInfo(str(height))
+        gdal_ds = openGdalDataset(input_layer)
+        rb1 = gdal_ds.GetRasterBand(1)
+        width = rb1.XSize
+        height = rb1.YSize
 
         all_histograms = []
         all_images = []
 
-        feedback.pushInfo('Calculating histograms...')
+        min_possible_x_start = 0
+        max_possible_x_start = width - TILE_SIZE
+        min_possible_y_start = 0
+        max_possible_y_start = height - TILE_SIZE
 
-        for y_start in range(0, width, 512):
-            for x_start in range(0, height, 512):
-                
-                if (x_start+512 >= width):
-                    continue
-                
-                if (y_start+512 >= height):
-                    continue
-                
-                data_red = as_np_array_1[x_start:x_start+512, y_start:y_start+512]
-                data_gre = as_np_array_2[x_start:x_start+512, y_start:y_start+512]
-                data_blu = as_np_array_3[x_start:x_start+512, y_start:y_start+512]
+        # Ramdomly read some chunks...
+        feedback.pushInfo('Taking some samples...')
+        for chunk_n in range(0, RANDOM_CHUNKS):
+            random_x_start = np.random.randint(min_possible_x_start, max_possible_x_start)
+            random_y_start = np.random.randint(min_possible_y_start, max_possible_y_start)
+            
+            data_red = loadTile(gdal_ds, 1, random_x_start, random_y_start, TILE_SIZE, TILE_SIZE)
+            data_gre = loadTile(gdal_ds, 2, random_x_start, random_y_start, TILE_SIZE, TILE_SIZE)
+            data_blu = loadTile(gdal_ds, 3, random_x_start, random_y_start, TILE_SIZE, TILE_SIZE)
 
-                hist_red, bin_edges = np.histogram(data_red, bins=256, range=(0,255), density=True)
-                hist_gre, bin_edges = np.histogram(data_gre, bins=256, range=(0,255), density=True)
-                hist_blu, bin_edges = np.histogram(data_blu, bins=256, range=(0,255), density=True)
+            count_zero = np.sum(data_red == 0)
+            count_non_zero = np.sum(data_red != 0)
 
-                tile_hist = TileHistogram(hist_red, hist_gre, hist_blu)
+            zero_ratio = count_zero / count_non_zero
+            if (zero_ratio > MISSING_PIXEL_TOL):    # Handling of black regions
+                continue
 
-                all_histograms.append(tile_hist)
-                
-                # Create an Image object:
-                image = []
-                for i in range(512):
-                    row = []
-                    for j in range(512):
-                        pixel_rgb = (data_red[i,j], data_gre[i,j], data_blu[i,j])
-                        row.append(pixel_rgb)
-                    image.append(row)
-                
-                # Append the Image object to the all_images list:
-                all_images.append(image)
+            hist_red, bin_edges = np.histogram(data_red, bins=256, range=(0,255), density=True)
+            hist_gre, bin_edges = np.histogram(data_gre, bins=256, range=(0,255), density=True)
+            hist_blu, bin_edges = np.histogram(data_blu, bins=256, range=(0,255), density=True)
+
+            tile_hist = TileHistogram(hist_red, hist_gre, hist_blu)
+
+            all_histograms.append(tile_hist)
+
+            # Create an Image object:
+            image = []
+            for i in range(TILE_SIZE):
+                row = []
+                for j in range(TILE_SIZE):
+                    pixel_rgb = (data_red[i,j], data_gre[i,j], data_blu[i,j])
+                    row.append(pixel_rgb)
+                image.append(row)
+            
+            # Append the Image object to the all_images list:
+            all_images.append(image)
         
         feedback.pushInfo('Finding diverse...')
 
@@ -372,24 +391,9 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
 
         avg_hist_matching_f = self.compute_average_function(hist_matching_functions)
 
-        feedback.pushInfo('Applying on output...')
+        feedback.pushInfo('Building output...')
 
-        # Output...
-        output_array_1 = np.copy(as_np_array_1)
-        output_array_2 = np.copy(as_np_array_2)
-        output_array_3 = np.copy(as_np_array_3)
-
-        # Apply the hist_matching_function
-        for x in range(width):
-            for y in range(height):
-                output_array_1[x, y] = avg_hist_matching_f.r_func[as_np_array_1[x, y]]
-                output_array_2[x, y] = avg_hist_matching_f.g_func[as_np_array_2[x, y]]
-                output_array_3[x, y] = avg_hist_matching_f.b_func[as_np_array_3[x, y]]
-
-        feedback.pushInfo('Saving...')
-
-        # Save:
-        writeFromNumpy(output_array_1, output_array_2, output_array_3, output_file, as_np_dataset_1)
+        writeApplyingFunction(gdal_ds, avg_hist_matching_f, output_file)
 
         return {self.OUTPUT: output_file}
         
