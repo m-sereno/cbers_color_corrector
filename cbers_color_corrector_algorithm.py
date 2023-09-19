@@ -43,6 +43,7 @@ from qgis.core import (Qgis,
                        QgsProcessing,
                        QgsFeatureSink,
                        QgsProcessingAlgorithm,
+                       QgsProcessingFeedback,
                        QgsProcessingParameterFeatureSource,
                        QgsProcessingParameterRasterLayer,
                        QgsProcessingParameterFile,
@@ -62,6 +63,13 @@ TILE_SIZE = 512
 REWRITE_STEP_SIZE = 256
 RANDOM_CHUNKS = 50
 MISSING_PIXEL_TOL = 0.01
+
+PROG_PCT_OPEN_RASTER = 1
+PROG_PCT_RANDOM_CHUN = 9
+PROG_PCT_GET_DIVERSE = 1
+PROG_PCT_BEST_MATCHS = 19
+PROG_PCT_BUIL_OUTPUT = 70
+
 
 class TileHistogram():
     def __init__(self, r_hist : np.ndarray, g_hist : np.ndarray, b_hist : np.ndarray):
@@ -119,7 +127,7 @@ def loadTile(gdalDs: Dataset, band: int, x_off: int, y_off: int, x_size: int, y_
     np_arr = np.array(gdalDs.GetRasterBand(band).ReadAsArray(x_off, y_off, x_size, y_size).transpose())
     return np_arr
 
-def writeApplyingFunction(ds_in: Dataset, hm_f: HistMatchingFunction, outFileName: str):
+def writeApplyingFunction(ds_in: Dataset, hm_f: HistMatchingFunction, outFileName: str, feedback: QgsProcessingFeedback):
     filenameNoExtension = outFileName.split('.')[0]
     actualFilename = filenameNoExtension + '.TIF'
 
@@ -132,13 +140,22 @@ def writeApplyingFunction(ds_in: Dataset, hm_f: HistMatchingFunction, outFileNam
     outdata.SetGeoTransform(ds_in.GetGeoTransform())
     outdata.SetProjection(ds_in.GetProjection())
 
+    progress_before = feedback.progress()
+    total_2d = width * height
     for x_off in range(0, width, REWRITE_STEP_SIZE):
+
         if (x_off + REWRITE_STEP_SIZE > width):
             continue
         
         for y_off in range(0, height, REWRITE_STEP_SIZE):
             if (y_off + REWRITE_STEP_SIZE > height):
                 continue
+            
+            if feedback.isCanceled():
+                return
+            
+            progress_now = progress_before + ((x_off * height + y_off) / total_2d)
+            feedback.setProgress(progress_now)
             
             arr_r = np.array(ds_in.GetRasterBand(1).ReadAsArray(x_off, y_off, REWRITE_STEP_SIZE, REWRITE_STEP_SIZE))
             arr_g = np.array(ds_in.GetRasterBand(2).ReadAsArray(x_off, y_off, REWRITE_STEP_SIZE, REWRITE_STEP_SIZE))
@@ -292,8 +309,12 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         sample_tiles = self.parameterAsInt(parameters, 'SAMPLE_TILES', context)
         server_url = self.parameterAsString(parameters, 'SERVER_URL', context)
 
+        current_progress = 0
+
         # Open the raster
         feedback.pushInfo('Opening raster file...')
+        feedback.setProgressText("Opening raster file")
+        feedback.setProgress(current_progress)
         input_layer = QgsRasterLayer(input_file, "input")
 
         # Ensure the layer was loaded successfully
@@ -313,9 +334,17 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         min_possible_y_start = 0
         max_possible_y_start = height - TILE_SIZE
 
+        current_progress += PROG_PCT_OPEN_RASTER
+
         # Ramdomly read some chunks...
         feedback.pushInfo('Taking some samples...')
+        feedback.setProgressText("Taking some samples")
+        feedback.setProgress(current_progress)
+        step_size = PROG_PCT_RANDOM_CHUN / RANDOM_CHUNKS
         for chunk_n in range(0, RANDOM_CHUNKS):
+            feedback.setProgress(current_progress + step_size * chunk_n)
+            if feedback.isCanceled():
+                return
             random_x_start = np.random.randint(min_possible_x_start, max_possible_x_start)
             random_y_start = np.random.randint(min_possible_y_start, max_possible_y_start)
             
@@ -350,7 +379,11 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
             # Append the Image object to the all_images list:
             all_images.append(image)
         
+        current_progress += PROG_PCT_RANDOM_CHUN
+
         feedback.pushInfo('Finding diverse...')
+        feedback.setProgressText("Finding diverse tiles")
+        feedback.setProgress(current_progress)
 
         diverse_indexes = self.find_most_diverse(all_histograms, sample_tiles)
         diverse_histograms = [all_histograms[i] for i in diverse_indexes]
@@ -358,9 +391,19 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
 
         hist_matching_functions = []
 
-        feedback.pushInfo('Getting best matches...')
+        current_progress += PROG_PCT_GET_DIVERSE
 
-        for hist_index in range(0, len(diverse_histograms)):
+        feedback.pushInfo('Getting best matches...')
+        feedback.setProgressText("Getting best matches")
+        feedback.setProgress(current_progress)
+
+        step_count = len(diverse_histograms)
+        step_size = PROG_PCT_BEST_MATCHS / step_count
+        for hist_index in range(0, step_count):
+            feedback.setProgress(current_progress + step_size * hist_index)
+            if feedback.isCanceled():
+                return
+
             hist : TileHistogram = diverse_histograms[hist_index]
             img : Image = diverse_images[hist_index]
 
@@ -391,9 +434,13 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
 
         avg_hist_matching_f = self.compute_average_function(hist_matching_functions)
 
-        feedback.pushInfo('Building output...')
+        current_progress += PROG_PCT_BEST_MATCHS
 
-        writeApplyingFunction(gdal_ds, avg_hist_matching_f, output_file)
+        feedback.pushInfo('Building output...')
+        feedback.setProgressText("Building output")
+        feedback.setProgress(current_progress)
+
+        writeApplyingFunction(gdal_ds, avg_hist_matching_f, output_file, feedback)
 
         return {self.OUTPUT: output_file}
         
