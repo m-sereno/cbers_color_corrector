@@ -60,7 +60,7 @@ from qgis.core import (Qgis,
                        QgsRectangle)
 
 TILE_SIZE = 512
-REWRITE_STEP_SIZE = 256
+REWRITE_STEP_SIZE = 4096
 RANDOM_CHUNKS = 50
 MISSING_PIXEL_TOL = 0.01
 
@@ -142,6 +142,7 @@ def writeApplyingFunction(ds_in: Dataset, hm_f: HistMatchingFunction, outFileNam
 
     progress_before = feedback.progress()
     total_2d = width * height
+    total_steps = round(total_2d / (REWRITE_STEP_SIZE * REWRITE_STEP_SIZE))
     for x_off in range(0, width, REWRITE_STEP_SIZE):
 
         if (x_off + REWRITE_STEP_SIZE > width):
@@ -154,8 +155,10 @@ def writeApplyingFunction(ds_in: Dataset, hm_f: HistMatchingFunction, outFileNam
             if feedback.isCanceled():
                 return
             
-            progress_now = progress_before + ((x_off * height + y_off) / total_2d)
+            step_n = round((x_off/REWRITE_STEP_SIZE) * (height/REWRITE_STEP_SIZE) + (y_off/REWRITE_STEP_SIZE))
+            progress_now = progress_before + step_n / total_steps
             feedback.setProgress(progress_now)
+            feedback.setProgressText(f"Building output... {step_n} / {total_steps}")
             
             arr_r = np.array(ds_in.GetRasterBand(1).ReadAsArray(x_off, y_off, REWRITE_STEP_SIZE, REWRITE_STEP_SIZE))
             arr_g = np.array(ds_in.GetRasterBand(2).ReadAsArray(x_off, y_off, REWRITE_STEP_SIZE, REWRITE_STEP_SIZE))
@@ -312,7 +315,6 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         current_progress = 0
 
         # Open the raster
-        feedback.pushInfo('Opening raster file...')
         feedback.setProgressText("Opening raster file")
         feedback.setProgress(current_progress)
         input_layer = QgsRasterLayer(input_file, "input")
@@ -337,7 +339,6 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         current_progress += PROG_PCT_OPEN_RASTER
 
         # Ramdomly read some chunks...
-        feedback.pushInfo('Taking some samples...')
         feedback.setProgressText("Taking some samples")
         feedback.setProgress(current_progress)
         step_size = PROG_PCT_RANDOM_CHUN / RANDOM_CHUNKS
@@ -381,7 +382,6 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         
         current_progress += PROG_PCT_RANDOM_CHUN
 
-        feedback.pushInfo('Finding diverse...')
         feedback.setProgressText("Finding diverse tiles")
         feedback.setProgress(current_progress)
 
@@ -393,7 +393,6 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
 
         current_progress += PROG_PCT_GET_DIVERSE
 
-        feedback.pushInfo('Getting best matches...')
         feedback.setProgressText("Getting best matches")
         feedback.setProgress(current_progress)
 
@@ -436,7 +435,6 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
 
         current_progress += PROG_PCT_BEST_MATCHS
 
-        feedback.pushInfo('Building output...')
         feedback.setProgressText("Building output")
         feedback.setProgress(current_progress)
 
