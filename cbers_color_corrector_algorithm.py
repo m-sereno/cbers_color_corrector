@@ -31,6 +31,7 @@ __copyright__ = '(C) 2023 by Mateus Sereno'
 __revision__ = '$Format:%H$'
 
 import numpy as np
+import random
 import requests
 import os
 from pathlib import Path
@@ -70,7 +71,6 @@ from qgis.core import (Qgis,
 
 TILE_SIZE = 512
 REWRITE_STEP_SIZE = 1024
-RANDOM_CHUNKS = 100
 MISSING_PIXEL_TOL = 0.01
 
 PROG_PCT_OPEN_RASTER = 1
@@ -317,6 +317,7 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
     INPUT = 'INPUT'
     TEMP = 'TEMP'
     SAMPLE_TILES = 'SAMPLE_TILES'
+    EVAL_TILES = 'EVAL_TILES'
     SERVER_URL = 'SERVER_URL'
 
     def initAlgorithm(self, config):
@@ -345,8 +346,17 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
 
         self.addParameter(
             QgsProcessingParameterNumber(
+                self.EVAL_TILES,
+                self.tr('Number of evaluated tiles (candidates to be sent to server)'),
+                minValue=1,
+                defaultValue=60
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
                 self.SAMPLE_TILES,
-                self.tr('Number of sample tiles'),
+                self.tr('Number of sample tiles (will be sent to the server)'),
                 minValue=1,
                 defaultValue=20
             )
@@ -432,6 +442,7 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         output_file = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
         temp_folder = self.parameterAsFile(parameters, self.TEMP, context)
         sample_tiles = self.parameterAsInt(parameters, self.SAMPLE_TILES, context)
+        eval_tiles = self.parameterAsInt(parameters, self.EVAL_TILES, context)
         server_url = self.parameterAsString(parameters, self.SERVER_URL, context)
 
         p_file_out = Path(output_file)
@@ -464,15 +475,26 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         current_progress += PROG_PCT_OPEN_RASTER
 
         # Ramdomly read some chunks...
+
+        possible_starts = [(x, y) for x in range(0, width - TILE_SIZE + 1, TILE_SIZE) 
+                                  for y in range(0, height - TILE_SIZE + 1, TILE_SIZE)]
+        
+        if len(possible_starts) < eval_tiles:
+            eval_tiles = len(possible_starts)
+        
+        selected_starts = random.sample(possible_starts, eval_tiles)
+
         feedback.setProgressText("Taking some samples")
         feedback.setProgress(current_progress)
-        step_size = PROG_PCT_RANDOM_CHUN / RANDOM_CHUNKS
-        for chunk_n in range(0, RANDOM_CHUNKS):
+        step_size = PROG_PCT_RANDOM_CHUN / eval_tiles
+        for chunk_n in range(0, eval_tiles):
+            chosen_start = selected_starts[chunk_n]
+            random_x_start = chosen_start[0]
+            random_y_start = chosen_start[1]
+
             feedback.setProgress(current_progress + step_size * chunk_n)
             if feedback.isCanceled():
                 return
-            random_x_start = np.random.randint(min_possible_x_start, max_possible_x_start)
-            random_y_start = np.random.randint(min_possible_y_start, max_possible_y_start)
             
             data_red = loadTile(gdal_ds, 1, random_x_start, random_y_start, TILE_SIZE, TILE_SIZE)
             data_gre = loadTile(gdal_ds, 2, random_x_start, random_y_start, TILE_SIZE, TILE_SIZE)
