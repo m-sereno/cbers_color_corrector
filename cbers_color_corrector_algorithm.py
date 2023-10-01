@@ -32,12 +32,20 @@ __revision__ = '$Format:%H$'
 
 import numpy as np
 import requests
+import os
+from pathlib import Path
+import re
+import json
 from requests.auth import HTTPBasicAuth
+import time
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple, Union
 
 from osgeo import gdal, ogr
 from osgeo.gdal import Dataset
 
+from qgis import processing
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (Qgis,
                        QgsProcessing,
@@ -48,6 +56,7 @@ from qgis.core import (Qgis,
                        QgsProcessingParameterRasterLayer,
                        QgsProcessingParameterFile,
                        QgsProcessingParameterFileDestination,
+                       QgsProcessingParameterFolderDestination,
                        QgsProcessingParameterNumber,
                        QgsProcessingParameterString,
                        QgsRasterLayer,
@@ -60,16 +69,17 @@ from qgis.core import (Qgis,
                        QgsRectangle)
 
 TILE_SIZE = 512
-REWRITE_STEP_SIZE = 4096
-RANDOM_CHUNKS = 50
+REWRITE_STEP_SIZE = 1024
+RANDOM_CHUNKS = 100
 MISSING_PIXEL_TOL = 0.01
 
 PROG_PCT_OPEN_RASTER = 1
 PROG_PCT_RANDOM_CHUN = 9
 PROG_PCT_GET_DIVERSE = 1
 PROG_PCT_BEST_MATCHS = 19
-PROG_PCT_BUIL_OUTPUT = 70
-
+PROG_PCT_SPLIT_INPUT = 10
+PROG_PCT_APPLY_FUNCT = 50
+PROG_PCT_MERGE_OUTPT = 10
 
 class TileHistogram():
     def __init__(self, r_hist : np.ndarray, g_hist : np.ndarray, b_hist : np.ndarray):
@@ -114,70 +124,171 @@ class BestMatchResponse:
         return BestMatchResponse(cdf=TileCdf(r=r, g=g, b=b), similarity=dct['similarity'])
 
 
-def openGdalDataset(inputRaster: Union[str, QgsRasterLayer]) -> Dataset:
+def openGdalDatasetReadonly(inputRaster: Union[str, QgsRasterLayer]) -> Dataset:
     inputRasterPath = (
         inputRaster.dataProvider().dataSourceUri()
         if isinstance(inputRaster, QgsRasterLayer)
         else inputRaster
     )
-    ds = gdal.Open(inputRasterPath)
+    ds = gdal.Open(inputRasterPath, gdal.GA_ReadOnly)
     return ds
 
 def loadTile(gdalDs: Dataset, band: int, x_off: int, y_off: int, x_size: int, y_size: int) -> np.array:
     np_arr = np.array(gdalDs.GetRasterBand(band).ReadAsArray(x_off, y_off, x_size, y_size).transpose())
     return np_arr
 
-def writeApplyingFunction(ds_in: Dataset, hm_f: HistMatchingFunction, outFileName: str, feedback: QgsProcessingFeedback):
+def splitSceneFileIntoMultipleFiles(path_file_in: str, path_folder_out: str, context, feedback) -> list[str]:
+    p_filein = Path(path_file_in)
+    filename = p_filein.name
+    filename_no_suffix = p_filein.with_suffix('').name
+    myresult = processing.run("gdal:retile", {'INPUT': path_file_in,
+               'TILE_SIZE_X': REWRITE_STEP_SIZE,
+               'TILE_SIZE_Y': REWRITE_STEP_SIZE,
+               'OVERLAP': 0,
+               'LEVELS': 1,
+               'OUTPUT': path_folder_out},
+               context=context, feedback=feedback, is_child_algorithm=True)
+    
+    pattern = f"^{filename_no_suffix}_\d+_\d+.tif$"
+    
+    every_file_here = os.listdir(path_folder_out)
+    result_files = []
+    for out_path in every_file_here:
+      s_res = re.search(pattern, out_path)
+      if s_res != None:
+        result_files.append(out_path)
+
+    return result_files
+
+def applyFunctionOnFile(output_def_tuples, output_base, hm_f: HistMatchingFunction, feedback: QgsProcessingFeedback):
+    progress_before = feedback.progress()
+
+    def do_work(it_tuple):
+        if feedback.isCanceled():
+            return
+        
+        filename = it_tuple[0]
+        full_path = it_tuple[1]
+        out_full_path = f"{output_base}/OUT_{filename}"
+
+        thread_ds = openGdalDatasetReadonly(full_path)
+        rb1 = thread_ds.GetRasterBand(1)
+        width = rb1.XSize
+        height = rb1.YSize
+        
+        arr_r = np.array(thread_ds.GetRasterBand(1).ReadAsArray())
+        arr_g = np.array(thread_ds.GetRasterBand(2).ReadAsArray())
+        arr_b = np.array(thread_ds.GetRasterBand(3).ReadAsArray())
+
+        [rows, cols] = arr_r.shape
+
+        for x in range(rows):
+            for y in range(cols):
+                arr_r[x, y] = hm_f.r_func[int(arr_r[x, y])]
+                arr_g[x, y] = hm_f.g_func[int(arr_r[x, y])]
+                arr_b[x, y] = hm_f.b_func[int(arr_r[x, y])]
+        
+        driver = gdal.GetDriverByName("GTiff")
+        outdata = driver.Create(out_full_path, width, height, 3, gdal.GDT_UInt16)
+        outdata.SetGeoTransform(thread_ds.GetGeoTransform())
+        outdata.SetProjection(thread_ds.GetProjection())
+
+        outdata.GetRasterBand(1).WriteArray(arr_r)
+        outdata.GetRasterBand(2).WriteArray(arr_g)
+        outdata.GetRasterBand(3).WriteArray(arr_b)
+
+        outdata.FlushCache() ##saves to disk!!
+        outdata = None
+
+    
+    pool = ThreadPoolExecutor(max_workers=8)
+    results = pool.map(do_work, output_def_tuples)
+
+    it_len = len(output_def_tuples)
+    it_idx = 0
+    
+    for _ in results:
+        it_idx += 1
+        progress_now = progress_before + round(PROG_PCT_APPLY_FUNCT * it_idx / it_len)
+        feedback.setProgress(progress_now)
+        feedback.setProgressText(f"Applying color adjustment function... {it_idx} / {it_len}")
+    
+    pool.shutdown()
+    
+
+def writeApplyingFunction(rl_in: QgsRasterLayer, hm_f: HistMatchingFunction, outFileName: str, tempFolder : str, feedback: QgsProcessingFeedback):
     filenameNoExtension = outFileName.split('.')[0]
-    actualFilename = filenameNoExtension + '.TIF'
+    actualFilename = filenameNoExtension + '.tif'
 
-    rb1 = ds_in.GetRasterBand(1)
-    width = rb1.XSize
-    height = rb1.YSize
+    input_path = rl_in.dataProvider().dataSourceUri()
+    output_path = tempFolder
 
-    driver = gdal.GetDriverByName("GTiff")
-    outdata = driver.Create(actualFilename, width, height, 3, gdal.GDT_UInt16)
-    outdata.SetGeoTransform(ds_in.GetGeoTransform())
-    outdata.SetProjection(ds_in.GetProjection())
+    feedback.setProgressText(f"Splitting scene into multiple files. This might take a couple minutes...")
+
+    splitted_files = splitSceneFileIntoMultipleFiles(input_path, output_path)
+    feedback.pushDebugInfo(str(splitted_files))
 
     progress_before = feedback.progress()
-    total_2d = width * height
-    total_steps = round(total_2d / (REWRITE_STEP_SIZE * REWRITE_STEP_SIZE))
-    for x_off in range(0, width, REWRITE_STEP_SIZE):
-
-        if (x_off + REWRITE_STEP_SIZE > width):
-            continue
+    feedback.setProgress(progress_before + PROG_PCT_SPLIT_INPUT)
+    feedback.setProgressText(f"Applying color adjustment function...")
+    
+    iteration_tuples = []
+    for filename in splitted_files:
+      full_path = f"{output_path}/{filename}"
+      iteration_tuples.append((filename, full_path))
+    
+    def do_work(it_tuple):
+        if feedback.isCanceled():
+            return
         
-        for y_off in range(0, height, REWRITE_STEP_SIZE):
-            if (y_off + REWRITE_STEP_SIZE > height):
-                continue
-            
-            if feedback.isCanceled():
-                return
-            
-            step_n = round((x_off/REWRITE_STEP_SIZE) * (height/REWRITE_STEP_SIZE) + (y_off/REWRITE_STEP_SIZE))
-            progress_now = progress_before + step_n / total_steps
-            feedback.setProgress(progress_now)
-            feedback.setProgressText(f"Building output... {step_n} / {total_steps}")
-            
-            arr_r = np.array(ds_in.GetRasterBand(1).ReadAsArray(x_off, y_off, REWRITE_STEP_SIZE, REWRITE_STEP_SIZE))
-            arr_g = np.array(ds_in.GetRasterBand(2).ReadAsArray(x_off, y_off, REWRITE_STEP_SIZE, REWRITE_STEP_SIZE))
-            arr_b = np.array(ds_in.GetRasterBand(3).ReadAsArray(x_off, y_off, REWRITE_STEP_SIZE, REWRITE_STEP_SIZE))
+        filename = it_tuple[0]
+        full_path = it_tuple[1]
+        out_full_path = f"{output_path}/OUT_{filename}"
 
-            [rows, cols] = arr_r.shape
+        thread_ds = openGdalDatasetReadonly(full_path)
+        rb1 = thread_ds.GetRasterBand(1)
+        width = rb1.XSize
+        height = rb1.YSize
+        
+        arr_r = np.array(thread_ds.GetRasterBand(1).ReadAsArray())
+        arr_g = np.array(thread_ds.GetRasterBand(2).ReadAsArray())
+        arr_b = np.array(thread_ds.GetRasterBand(3).ReadAsArray())
 
-            for x in range(rows):
-                for y in range(cols):
-                    arr_r[x, y] = hm_f.r_func[arr_r[x, y]]
-                    arr_g[x, y] = hm_f.g_func[arr_g[x, y]]
-                    arr_b[x, y] = hm_f.b_func[arr_b[x, y]]
-            
-            outdata.GetRasterBand(1).WriteArray(arr_r, x_off, y_off)
-            outdata.GetRasterBand(2).WriteArray(arr_g, x_off, y_off)
-            outdata.GetRasterBand(3).WriteArray(arr_b, x_off, y_off)
+        [rows, cols] = arr_r.shape
 
-    outdata.FlushCache() ##saves to disk!!
-    outdata = None
+        for x in range(rows):
+            for y in range(cols):
+                arr_r[x, y] = hm_f.r_func[int(arr_r[x, y])]
+                arr_g[x, y] = hm_f.g_func[int(arr_r[x, y])]
+                arr_b[x, y] = hm_f.b_func[int(arr_r[x, y])]
+        
+        driver = gdal.GetDriverByName("GTiff")
+        outdata = driver.Create(out_full_path, width, height, 3, gdal.GDT_UInt16)
+        outdata.SetGeoTransform(thread_ds.GetGeoTransform())
+        outdata.SetProjection(thread_ds.GetProjection())
+
+        outdata.GetRasterBand(1).WriteArray(arr_r)
+        outdata.GetRasterBand(2).WriteArray(arr_g)
+        outdata.GetRasterBand(3).WriteArray(arr_b)
+
+        outdata.FlushCache() ##saves to disk!!
+        outdata = None
+
+    
+    pool = ThreadPoolExecutor(max_workers=8)
+    results = pool.map(do_work, iteration_tuples)
+
+    it_len = len(iteration_tuples)
+    it_idx = 0
+    
+    for _ in results:
+        it_idx += 1
+        progress_now = progress_before + round(PROG_PCT_APPLY_FUNCT * it_idx / it_len)
+        feedback.setProgress(progress_now)
+        feedback.setProgressText(f"Applying color adjustment function... {it_idx} / {it_len}")
+    
+    pool.shutdown()
+
 
 def apply_histogram_matching_function(tgt_img, f):
   matched_image = np.zeros_like(tgt_img)
@@ -204,6 +315,9 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
     
     OUTPUT = 'OUTPUT'
     INPUT = 'INPUT'
+    TEMP = 'TEMP'
+    SAMPLE_TILES = 'SAMPLE_TILES'
+    SERVER_URL = 'SERVER_URL'
 
     def initAlgorithm(self, config):
         self.addParameter(
@@ -216,6 +330,13 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         )
 
         self.addParameter(
+            QgsProcessingParameterFolderDestination(
+                self.TEMP,
+                self.tr('TEMPORARY DESTINATION')
+            )
+        )
+
+        self.addParameter(
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 self.tr('OUTPUT DESTINATION')
@@ -224,7 +345,7 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
 
         self.addParameter(
             QgsProcessingParameterNumber(
-                'SAMPLE_TILES',
+                self.SAMPLE_TILES,
                 self.tr('Number of sample tiles'),
                 minValue=1,
                 defaultValue=20
@@ -233,9 +354,9 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
 
         self.addParameter(
             QgsProcessingParameterString(
-                'SERVER_URL',
+                self.SERVER_URL,
                 self.tr('Server URL'),
-                defaultValue='https://server-url/endpoint'
+                defaultValue='https://django.django.pfc.msereno.com/api/cbers-cc-plugin/tiles-512/similar/'
             )
     )
     
@@ -309,8 +430,12 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
     def processAlgorithm(self, parameters, context, feedback):
         input_file = self.parameterAsFile(parameters, self.INPUT, context)
         output_file = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
-        sample_tiles = self.parameterAsInt(parameters, 'SAMPLE_TILES', context)
-        server_url = self.parameterAsString(parameters, 'SERVER_URL', context)
+        temp_folder = self.parameterAsFile(parameters, self.TEMP, context)
+        sample_tiles = self.parameterAsInt(parameters, self.SAMPLE_TILES, context)
+        server_url = self.parameterAsString(parameters, self.SERVER_URL, context)
+
+        p_file_out = Path(output_file)
+        out_file_parent = p_file_out.parent
 
         current_progress = 0
 
@@ -323,7 +448,7 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         if not input_layer.isValid():
             raise QgsProcessingException("Could not load layer")
         
-        gdal_ds = openGdalDataset(input_layer)
+        gdal_ds = openGdalDatasetReadonly(input_layer)
         rb1 = gdal_ds.GetRasterBand(1)
         width = rb1.XSize
         height = rb1.YSize
@@ -385,6 +510,9 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         feedback.setProgressText("Finding diverse tiles")
         feedback.setProgress(current_progress)
 
+        found_count = len(all_histograms)
+        feedback.pushInfo(f"Found {found_count} valid tiles.")
+
         diverse_indexes = self.find_most_diverse(all_histograms, sample_tiles)
         diverse_histograms = [all_histograms[i] for i in diverse_indexes]
         diverse_images = [all_images[i] for i in diverse_indexes]
@@ -392,6 +520,9 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         hist_matching_functions = []
 
         current_progress += PROG_PCT_GET_DIVERSE
+
+        diverse_count = len(diverse_images)
+        feedback.pushInfo(f"Found {diverse_count} diverse tiles.")
 
         feedback.setProgressText("Getting best matches")
         feedback.setProgress(current_progress)
@@ -416,10 +547,28 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
             url = server_url
             req_obj = best_match_req.to_dict()
             headers = {'Content-type': 'application/json', 'Accept-Charset': 'UTF-8'}
-            basic = HTTPBasicAuth('msereno', 'pfc2023')
+            basic_user = 'msereno'
+            basic_pass = 'pfc2023'
+            basic = HTTPBasicAuth(basic_user, basic_pass)
+
+            if (hist_index == 0):
+                feedback.pushInfo("Sample payload:")
+                feedback.pushInfo(f"=== URL: {url}")
+                feedback.pushInfo(f"=== json: {json.dumps(req_obj)}")
+                feedback.pushInfo(f"=== headers: {json.dumps(headers)}")
+                feedback.pushInfo(f"=== auth: [{basic_user}] | [{basic_pass}]")
 
             res = requests.post(url, json=req_obj, headers=headers, verify=False, auth=basic)
+
+            if (hist_index == 0):
+                feedback.pushInfo("Sample response:")
+                feedback.pushInfo(f"=== elapsed: {str(res.elapsed)}")
+                feedback.pushInfo(f"=== headers: {json.dumps(dict(res.headers))}")
+                feedback.pushInfo(f"=== status_code: {str(res.status_code)}")
+
             best_match_res_json = res.json()
+            if (hist_index == 0):
+                feedback.pushInfo(f"=== content: {json.dumps(best_match_res_json)}")
 
             best_match_res = BestMatchResponse.from_json(best_match_res_json)
 
@@ -434,11 +583,17 @@ class CBERSColorCorrectorAlgorithm(QgsProcessingAlgorithm):
         avg_hist_matching_f = self.compute_average_function(hist_matching_functions)
 
         current_progress += PROG_PCT_BEST_MATCHS
-
-        feedback.setProgressText("Building output")
         feedback.setProgress(current_progress)
+        feedback.setProgressText("Splitting scene into multiple files. This might take a couple minutes...")
 
-        writeApplyingFunction(gdal_ds, avg_hist_matching_f, output_file, feedback)
+        splitted_files = splitSceneFileIntoMultipleFiles(input_file, temp_folder, context, feedback)
+
+        iteration_tuples = []
+        for filename in splitted_files:
+          full_path = f"{out_file_parent.as_posix()}/{filename}"
+          iteration_tuples.append((filename, full_path))
+        
+        applyFunctionOnFile(iteration_tuples, temp_folder, avg_hist_matching_f, feedback)
 
         return {self.OUTPUT: output_file}
         
